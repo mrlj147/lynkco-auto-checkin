@@ -1,0 +1,14 @@
+services:
+  lynkco-checkin:
+    image: mrlj147/lynkco-auto-checkin:latest
+    container_name: lynkco-checkin
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - lynkco-data:/data
+
+volumes:
+  lynkco-data:

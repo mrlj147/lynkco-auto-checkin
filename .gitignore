@@ -1,0 +1,11 @@
+.env
+data/
+*.har
+*.pcap
+*.csv
+*.zip
+*.apk
+token_cache.json
+__pycache__/
+*.pyc
+*.py
