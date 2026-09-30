@@ -1,173 +1,130 @@
-﻿# 领克App 自动签到
+# 领克 App 自动签到
 
-每日自动签到领克 App + 自动分享文章领积分，支持 Bark 推送通知。
+本仓库存放 Docker 部署配置，源码在 [lynkco-build](https://github.com/mrlj147/lynkco-build)。
 
 ## 功能
 
-- 每日自动签到（凌晨 1-6 点随机时间）
-- 自动刷新 Token（每次签到自动续期，永不过期）
-- 自动分享文章领积分（每天随机获取新文章，不重复）
-- Bark 推送通知（签到结果、积分余额、能量体、任务进度）
+- 每日随机时间签到，使用原生签名和 `/up/api/v1/user/sign/upgrade`；已签到时跳过写操作。
+- 查询任务前后的积分余额、累计积分和能量体，展示实际变化。
+- 从探索广场最新文章流随机选文章，优先避免分享历史中已用过的文章；没有可用文章时跳过，不使用固定旧文章兜底。
+- 分享优先采用 getShareCode → shareReporting 两步法，失败后回退 lookup → check → reporting 三步流程。
+- Bark 推送签到结果、分享文章标题、任务进度和积分前后对比；保留企业微信、钉钉、飞书通知。
+- Token 未过期时复用缓存，过期前自动续期；配置 APPCODE 时优先使用它，失败后回退 AppSecret 原生 HMAC。
+- 保留 DeepSeek 自动评论的提示词、选帖、去重、发表请求和评论通知。评论继续使用旧 H5 签名器，新签到使用独立原生签名器。
 
-## 快速开始
+分享接口返回成功不代表当天一定加分，通知以实际积分和能量体变化为准。完整回退流程也受服务端的内容检查、每日次数和账号规则影响。
 
-### 方式一：一行命令部署
+## 从旧版本升级
+
+1. 保留原来的 `.env`、`lynkco-data` 数据卷、Bark 和 DeepSeek 配置。
+2. 补充 `LYNKCO_DEVICE_ID`、`LYNKCO_NATIVE_APP_KEY`、`LYNKCO_NATIVE_APP_SECRET`。
+3. 原来的 `LYNKCO_CA_KEY` / `LYNKCO_CA_SECRET` 属于评论 H5 签名，**不要用新的原生密钥覆盖它们**。
+4. 更新镜像并重建容器：
 
 ```bash
-docker run -d \
-  --name lynkco-checkin \
-  --restart=unless-stopped \
-  -e TZ=Asia/Shanghai \
-  -e LYNKCO_CENTER_TOKEN=bearer你的token \
-  -e LYNKCO_REFRESH_TOKEN=bearer你的refreshToken \
-  -e LYNKCO_BARK_KEY=你的BarkKey \
-  -e LYNKCO_TOKEN_CACHE_PATH=/data/token_cache.json \
-  -v lynkco-data:/data \
-  mrlj147/lynkco-auto-checkin:latest
+docker compose pull
+docker compose up -d
+docker logs -f lynkco-checkin
 ```
 
-### 方式二：Docker Compose 部署
+新源码合并到构建仓库 main 并成功发布镜像后，拉取 latest 才能得到更新。
+
+## 部署
 
 ```bash
 git clone https://github.com/mrlj147/lynkco-auto-checkin.git
 cd lynkco-auto-checkin
 cp .env.example .env
-vi .env
+# 填写个人凭据、应用密钥与通知配置
 docker compose up -d
 ```
 
-## 抓取 Token（iPhone）
-
-1. 下载 [Stream](https://apps.apple.com/app/stream-network-debug-tool/id1312141691)
-2. 开始抓包 → 打开领克 App 退出重新登录 → 停止抓包
-3. 筛选域名 `app-services.lynkco.com.cn`，寻找 `login` → 从响应里复制 `token` 和 `refreshToken`
-
-登录成功后返回类似结构：
-
-```json
-{
-  "code": "success",
-  "data": {
-    "centerTokenDto": {
-      "token": "bearer****-****-****-****-************",
-      "refreshToken": "bearer****-****-****-****-************",
-      "expireAt": 1783000000000,
-      "refreshExpireAt": 1786000000000
-    }
-  }
-}
-```
-
-填写 `.env` 时：
-- `centerTokenDto.token` → `LYNKCO_CENTER_TOKEN`
-- `centerTokenDto.refreshToken` → `LYNKCO_REFRESH_TOKEN`
-
-## Token 自动续期
-
-每次签到时会自动刷新 Token，服务端返回新的 `centerToken` 和 `refreshToken`，保存到 `token_cache.json`。
-
-只要容器每天运行一次签到，Token 就永远不会过期，无需手动更新。
-
-**验证 Token 续期：**
+也可以直接运行：
 
 ```bash
-docker exec lynkco-checkin cat /data/token_cache.json
+docker run -d --name lynkco-checkin --restart=unless-stopped \
+  --env-file .env -e TZ=Asia/Shanghai \
+  -v lynkco-data:/data mrlj147/lynkco-auto-checkin:latest
 ```
 
-如果 `center_token` 和 `.env` 里的不同，说明续期正常工作。
+模拟器只用于获取应用密钥，日常容器不需要安卓环境。
 
-## 自动分享文章
+## 获取个人登录凭据
 
-每次签到后会自动执行分享任务。
+iPhone 可用 Stream 抓包，筛选 `app-services.lynkco.com.cn`：
+
+| 抓包字段 | 环境变量 |
+|---|---|
+| 登录响应 `data.centerTokenDto.token` | `LYNKCO_CENTER_TOKEN` |
+| 登录响应 `data.centerTokenDto.refreshToken` | `LYNKCO_REFRESH_TOKEN` |
+| 同次登录或续期请求参数 `deviceId` | `LYNKCO_DEVICE_ID` |
+
+deviceId 必须与 refreshToken 对应。应用密钥与个人登录凭据是不同的配置；原生 AppKey/AppSecret 的提取方法参考 [LynkCoHelper](https://github.com/shovelshit/LynkCoHelper)。
 
 ## 环境变量
 
-| 变量 | 必填 | 说明 |
-|---|---|---|
-| `LYNKCO_CENTER_TOKEN` | 是 | 登录态 Token（30 分钟过期，自动刷新） |
-| `LYNKCO_REFRESH_TOKEN` | 是 | 刷新 Token（每次签到自动续期） |
-| `LYNKCO_BARK_KEY` | 否 | Bark 推送 Key |
-| `LYNKCO_WECOM_WEBHOOK` | 否 | 企业微信机器人 Webhook |
-| `LYNKCO_DINGTALK_WEBHOOK` | 否 | 钉钉机器人 Webhook |
-| `LYNKCO_FEISHU_WEBHOOK` | 否 | 飞书机器人 Webhook |
-| `LYNKCO_TOKEN_CACHE_PATH` | 是 | Token 缓存路径，必须设置为 `/data/token_cache.json` |
-| `LYNKCO_CHECKIN_START` | 否 | 签到开始小时（默认 1，即凌晨 1 点） |
-| `LYNKCO_CHECKIN_END` | 否 | 签到结束小时（默认 6，即凌晨 6 点） |
+| 变量 | 用途 |
+|---|---|
+| `LYNKCO_CENTER_TOKEN` | 当前登录 Token；配置续期凭据后可自动获取 |
+| `LYNKCO_REFRESH_TOKEN` | 续期凭据，建议配置 |
+| `LYNKCO_DEVICE_ID` | 同次登录的设备 ID，续期必填 |
+| `LYNKCO_NATIVE_APP_KEY` / `LYNKCO_NATIVE_APP_SECRET` | 新签到、分享、积分查询的原生应用密钥 |
+| `LYNKCO_NATIVE_APP_CODE` | 可选 APPCODE 续期方案；没有也能使用 HMAC |
+| `LYNKCO_NATIVE_GL_DEV_ID` | 可选设备请求头，默认使用 deviceId |
+| `LYNKCO_APP_SECRETS` | 可选整合 JSON；字段 nativeAppKey/nativeAppSecret/nativeAppCode/glDevId，独立字段优先 |
+| `LYNKCO_DEVICE_HEADERS` | 可选设备请求头 JSON，支持使用抓包中的设备字段 |
+| `LYNKCO_APP_VERSION` / `LYNKCO_APP_BUILD` | 可选 App 版本、build 字段 |
+| `LYNKCO_TOKEN_CACHE_PATH` | 默认建议 `/data/token_cache.json` |
+| `LYNKCO_BARK_KEY` / `LYNKCO_BARK_SERVER` | Bark 推送配置，保留旧值 |
+| `LYNKCO_ENERGY_DELAY` | 任务后等积分更新的秒数，默认 5 |
+| `LYNKCO_CHECKIN_START` / `LYNKCO_CHECKIN_END` | 每日签到窗口，默认北京时间 1–6 点 |
+| `LYNKCO_COMMENT_ENABLED` | 自动评论开关，默认 false |
+| `LYNKCO_COMMENT_LIMIT` | 每日目标评论条数，默认 3 |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` | 保留现有自动评论模型配置 |
+| `LYNKCO_WECOM_WEBHOOK` / `LYNKCO_DINGTALK_WEBHOOK` / `LYNKCO_FEISHU_WEBHOOK` | 保留原有多渠道通知配置 |
 
-签到时间示例：
-- `1` / `6` = 凌晨 1:00-6:00 随机签到
-- `13` / `18` = 下午 13:00-18:00 随机签到
+## 自动评论
 
-## 注意事项
+启用评论后，容器仍先执行签到、分享、积分查询和每日通知，等待 5 分钟后运行评论。单次评论命令仍可用：
 
-- `LYNKCO_TOKEN_CACHE_PATH` 必须设置为 `/data/token_cache.json`，否则容器重建后 Token 丢失
-- volume 必须挂载到 `/data`，保证 Token 缓存和分享历史持久化
-- 不要在手机上退出领克 App 登录，否则 refreshToken 会立即失效
-- `restart: unless-stopped` 保证容器自动重启，每天自动签到续期
-
-## Bark 通知示例
-
-```
-领克App 自动签到
-签到成功
-Co积分: +1
-能量体: +5
-连续签到: 2 天
-分享文章: 1881101031748870144
-补签卡: 0 张
-签到任务:
-  连续签到7天: 2/7 (1能量体)
-  本月度签到25天: 3/25 (1补签卡)
-  本季度签到85天: 3/85 (2补签卡)
-  连续签到365天: 2/365 (20能量体, 365Co积分)
-积分余额: ****
-累计积分: ****
-能量体: ***
-token 有效期截至到:2026-**-** **:**:**
-```
-
-## 常见问题
-
-**Q: 会不会挤掉手机上的账号？**
-A: 不会。Token 和手机登录会话是独立的。
-
-**Q: refreshToken 会过期吗？**
-A: 不会。每次签到都会自动刷新，新 Token 会保存到 `token_cache.json`。只要每天运行一次，就永远不会过期。
-
-**Q: 怎么查看日志？**
 ```bash
-docker logs -f lynkco-checkin
+docker exec lynkco-checkin python main.pyc --comment --comment-limit 3
 ```
 
-**Q: 怎么更新 Token？**
-A: 正常情况下不需要手动更新。如果长期停止运行超过 30 天，才需要重新抓包获取新的 refreshToken。
+本次修复了旧入口同时传 `--schedule --comment` 会提前进入单次评论、跳过定时签到的问题。评论正文生成、成功间隔、失败重试和历史去重逻辑保持原样。
+
+## Token 与数据持久化
+
+挂载 `/data` 保留 Token 缓存、分享历史和评论历史。续期成功后保存新的 token、refreshToken 及服务端过期时间，缓存文件只允许文件所有者读写。
+
+refreshToken 可能过期或被服务端撤销，不保证永久有效。重新登录后请更新个人凭据；如仍使用旧缓存，可备份后删除 `/data/token_cache.json` 再重启。不要删除整个数据卷，以免丢失评论历史。
+
+## 通知示例
+
+```text
+领克App 自动签到
+今日已签到
+分享接口成功（奖励以积分变化为准）
+分享文章: 周末出行分享（虚构示例）
+分享流程: 简化两步
+积分余额: 0 → 5（+5）
+能量体: 100 → 102（+2）
+累计积分: 2005
+```
+
+## 常见操作
+
+```bash
+# 立即执行一轮签到、分享、积分对比与通知
+docker exec lynkco-checkin python main.pyc --once
+# 查看签到任务
+docker exec lynkco-checkin python main.pyc --info
+# 单独执行分享
+docker exec lynkco-checkin python main.pyc --share
+```
+
+上述手动命令不会额外运行自动评论。Bark 未配置时仅输出日志，签到和分享仍可运行。
 
 ## 致谢
 
-感谢 [四十六](https://github.com/suyunkai) 大佬提供的 token 续期思路。
-
-## 推送渠道
-
-支持以下推送渠道（可同时配置多个，不填则不推送）：
-
-| 渠道 | 环境变量 | 说明 |
-|---|---|---|
-| Bark | `LYNKCO_BARK_KEY` | iOS 推送，需安装 Bark App |
-| 企业微信 | `LYNKCO_WECOM_WEBHOOK` | 企业微信群机器人 Webhook |
-| 钉钉 | `LYNKCO_DINGTALK_WEBHOOK` | 钉钉群机器人 Webhook |
-| 飞书 | `LYNKCO_FEISHU_WEBHOOK` | 飞书群机器人 Webhook |
-
-## 更新日志
-
-- 2026-07-10: 新增企业微信/钉钉/飞书 Webhook 推送
-- 2026-07-09: 新增自动分享文章领积分（每天随机获取新文章，不重复）
-- 2026-07-09: 新增 Bark 通知显示下次签到时间（精确到分钟）
-- 2026-07-09: 新增 Bark 通知显示积分余额、累计积分、能量体
-- 2026-07-09: 修复签到时间计算，容器在窗口外启动时正确等到第二天
-- 2026-07-09: 修复 Token 缓存路径，容器重建后 Token 不丢失
-- 2026-07-08: Token 自动续期，每次签到自动刷新 refreshToken
-- 2026-07-08: 初始版本，支持定时签到 + Bark 推送通知
-
-## 免责声明
-
-仅供学习交流，请勿滥用。
+原生签名与分享协议参考 [shovelshit/LynkCoHelper](https://github.com/shovelshit/LynkCoHelper)，MIT 许可说明随构建镜像提供。保留原项目对 [四十六](https://github.com/suyunkai) 的致谢。
